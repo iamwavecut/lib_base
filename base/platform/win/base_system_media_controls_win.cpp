@@ -119,9 +119,15 @@ struct SystemMediaControls::Private {
 		= winrt::Streams::IRandomAccessStreamReferenceStatics;
 	Private()
 	: controls(nullptr)
-	, referenceStatics(winrt::get_activation_factory
-		<winrt::Streams::RandomAccessStreamReference,
-		IReferenceStatics>()) {
+	// Unwrapped, this threw straight out of the constructor: WinRT maps an
+	// E_OUTOFMEMORY from the out-of-process server to std::bad_alloc, which
+	// nothing here catches. The only use of referenceStatics is already
+	// inside a Try(), so a null one degrades instead of aborting.
+	, referenceStatics(WinRT::Try([] {
+		return winrt::get_activation_factory<
+			winrt::Streams::RandomAccessStreamReference,
+			IReferenceStatics>();
+	}).value_or(IReferenceStatics(nullptr))) {
 	}
 
 	ControlsWindow window;
@@ -339,6 +345,13 @@ void SystemMediaControls::setThumbnail(const QImage &thumbnail) {
 				return;
 			}
 
+			if (!_private->referenceStatics) {
+				// The activation factory failed in the constructor. Calling
+				// through a null projected interface reads a vtable pointer
+				// out of nullptr, which is an access violation Try() cannot
+				// catch - so the artwork is simply skipped.
+				return;
+			}
 			WinRT::Try([&] {
 				_private->displayUpdater.Thumbnail(
 					_private->referenceStatics.CreateFromStream(thumbStream));
@@ -369,7 +382,13 @@ void SystemMediaControls::clearThumbnail() {
 
 void SystemMediaControls::clearMetadata() {
 	WinRT::Try([&] {
-		_private->displayUpdater.ClearAll();
+		if (_private->displayUpdater) {
+			// A failed init() can leave this null with the button handler
+			// already registered, and the destructor calls us in that case.
+			// Calling through a null projected interface reads a vtable
+			// pointer out of nullptr - an access violation Try() can't catch.
+			_private->displayUpdater.ClearAll();
+		}
 		_private->controls.IsEnabled(false);
 	});
 }
